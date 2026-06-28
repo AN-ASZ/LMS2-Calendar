@@ -70,7 +70,7 @@ async function run(username, password) {
     // Launch browser
     const browser = await chromium.launch({
         executablePath: process.env.CHROMIUM_PATH,
-        headless: true,
+        headless: false,
         args: [
             '--no-sandbox',
             '--disable-gpu'

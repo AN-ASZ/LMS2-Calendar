@@ -11,9 +11,26 @@ const folder = path.join(__dirname, 'db');
 
 // Scraper main function
 async function run(username, password) {
-    // CSV writers per user
-    const temp = createCsvWriter({
-        path: path.join(folder, `temp${username}.csv`),
+    const checkFilePath = path.join(folder, `check${username}.csv`);
+
+    async function readCSV(filePath) {
+        if (!fs.existsSync(filePath)) return [];
+        return new Promise((resolve, reject) => {
+            const rows = [];
+            fs.createReadStream(filePath)
+                .pipe(csv())
+                .on('data', (row) => rows.push(row))
+                .on('end', () => resolve(rows))
+                .on('error', reject);
+        });
+    }
+
+    const existingEvents = await readCSV(checkFilePath);
+    const existingIDs = new Set(existingEvents.map(e => e.EventID));
+    let allEvents = [...existingEvents];
+
+    const check = createCsvWriter({
+        path: checkFilePath,
         header: [
             { id: 'evID', title: 'EventID' },
             { id: 'cID', title: 'CourseID' },
@@ -23,35 +40,6 @@ async function run(username, password) {
             { id: 'closes', title: 'EventClose' },
         ]
     });
-
-    const check = createCsvWriter({
-        path: path.join(folder, `check${username}.csv`),
-        header: [
-            { id: 'evID', title: 'EventID' },
-            { id: 'cID', title: 'CourseID' },
-            { id: 'evTitle', title: 'Title' },
-            { id: 'evType', title: 'EventType' },
-            { id: 'opened', title: 'EventOpen' },
-            { id: 'closes', title: 'EventClose' },
-        ],
-        append: true
-    });
-
-    // Utility: check duplicate per-user
-    async function isDuplicate(evID) {
-        const filePath = path.join(folder, `check${username}.csv`);
-        if (!fs.existsSync(filePath)) return false;
-
-        return new Promise((resolve, reject) => {
-            const existingIDs = new Set();
-            fs.createReadStream(filePath)
-                .pipe(csv())
-                .on('data', (row) => existingIDs.add(row.EventID))
-                .on('end', () => resolve(existingIDs.has(evID)))
-                .on('error', reject);
-        });
-    }
-
 
     // Utility: write CSV
     async function write(writer, data) {
@@ -93,7 +81,6 @@ async function run(username, password) {
     const eventCount = await page.$$eval("div.event", (nodes) => nodes.length);
     console.log(`📌 Found ${eventCount} events`);
 
-    let eventData = [];
     let Course = "Unknown Course";
 
     for (let i = 1; i <= eventCount; i++) {
@@ -111,8 +98,7 @@ async function run(username, password) {
         const evType = await parent.getAttribute("data-event-eventtype");
 
         // Check for closed events and duplicates BEFORE navigating
-        const duplicate = await isDuplicate(evID);
-        if (duplicate) {
+        if (existingIDs.has(evID)) {
             console.log(`⏩ EventID ${evID} already exists, skipping`);
             continue;
         }
@@ -175,10 +161,7 @@ async function run(username, password) {
         await page.goBack();
 
         const evData = { evID, cID, evTitle, evType, opened, closes };
-        eventData.push(evData);
-
-        // Write temp CSV for this event
-        await write(temp, [evData]);
+        allEvents.push(evData);
 
         // Map course name
 
@@ -203,7 +186,7 @@ async function run(username, password) {
     }
 
     // Write full check CSV
-    await write(check, eventData);
+    await write(check, allEvents);
 
     await browser.close();
     console.log("✅ Scraping finished for", username);

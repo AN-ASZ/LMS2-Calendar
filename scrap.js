@@ -33,7 +33,8 @@ async function run(username, password) {
             { id: 'evType', title: 'EventType' },
             { id: 'opened', title: 'EventOpen' },
             { id: 'closes', title: 'EventClose' },
-        ]
+        ],
+        append: true
     });
 
     // Utility: check duplicate per-user

@@ -158,6 +158,11 @@ async function run(username, password) {
         await page.click(`${selector} > div:nth-child(1) > div:nth-child(3) > a:nth-child(1)`);
         await page.waitForLoadState("networkidle");
 
+        const hasDates = await page.$('.activity-dates');
+        if (!hasDates) {
+            await page.goBack();
+            continue;
+        }
         let opened = (await page.textContent(".activity-dates > div:nth-child(1)")).trim();
         let closes = (await page.textContent(".activity-dates > div:nth-child(2)")).trim();
 

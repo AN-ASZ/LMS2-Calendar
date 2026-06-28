@@ -1,5 +1,6 @@
 const express = require('express');
 const session = require('express-session');
+const cron = require('node-cron');
 const { oauth2Client, getTokens, saveToken } = require('./auth');
 const { run } = require('./scrap');
 const fs = require('fs');
@@ -96,9 +97,8 @@ else {
     // Initial run
     runScrape();
     // Schedule every 10 minutes
-    //setInterval(runScrape, 10 * 60 * 1000);
 }
-//runScrape();
+cron.schedule('0 */2 * * *', runScrape);
 
 app.listen(3000, () => {
     console.log("Server running at http://localhost:3000");

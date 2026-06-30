@@ -9,24 +9,24 @@ const path = require('path');
 
 const folder = path.join(__dirname, 'db');
 
+async function readCSV(filePath) {
+    if (!fs.existsSync(filePath)) return [];
+    return new Promise((resolve, reject) => {
+        const rows = [];
+        fs.createReadStream(filePath)
+            .pipe(csv())
+            .on('data', (row) => rows.push(row))
+            .on('end', () => resolve(rows))
+            .on('error', reject);
+    });
+}
+
 async function run(username, password) {
     const checkFilePath = path.join(folder, `check${username}.csv`);
 
-    async function readCSV(filePath) {
-        if (!fs.existsSync(filePath)) return [];
-        return new Promise((resolve, reject) => {
-            const rows = [];
-            fs.createReadStream(filePath)
-                .pipe(csv())
-                .on('data', (row) => rows.push(row))
-                .on('end', () => resolve(rows))
-                .on('error', reject);
-        });
-    }
-
     const existingEvents = await readCSV(checkFilePath);
 
-    // ✅ FIX: CSV is written with title 'EventID', so re-read rows have key 'EventID'.
+    // FIX: CSV is written with title 'EventID', so re-read rows have key 'EventID'.
     // Normalize them back to evID so allEvents always uses one consistent shape.
     const normalizedExisting = existingEvents.map(e => ({
         evID:    e.evID    ?? e.EventID,
@@ -65,6 +65,7 @@ async function run(username, password) {
         }
     }
 
+    // ── Phase 0: Launch main browser, login, goto calendar ──
     const browser = await chromium.launch({
         executablePath: process.env.CHROMIUM_PATH,
         headless: false,
@@ -75,100 +76,116 @@ async function run(username, password) {
     await page.goto("https://lms.psu.ac.th/login/index.php?loginredirect=1");
     await page.type("input[name=username]", username, { delay: 10 });
     await page.type("input[name=password]", password, { delay: 10 });
+    page.click("button[id=close-popup-btn]");
     await page.click("button[id=loginbtn]");
     await page.waitForLoadState();
 
     await page.goto("https://lms.psu.ac.th/calendar/view.php");
     await page.waitForLoadState();
 
-    const eventCount = await page.$$eval("div.event", (nodes) => nodes.length);
-    console.log(`📌 Found ${eventCount} events`);
+    // ── Phase 1: Extract ALL event metadata in ONE evaluate() call ──
+    const allEventsMeta = await page.evaluate(() => {
+        const events = [];
+        document.querySelectorAll('div.event').forEach((evt, index) => {
+            const evID       = evt.getAttribute('data-event-id');
+            const cID        = evt.getAttribute('data-course-id');
+            const evTitle    = evt.getAttribute('data-event-title');
+            const evType     = evt.getAttribute('data-event-eventtype');
 
-    let Course = "Unknown Course";
+            // Course extraction logic - same as original single-page code
+            const selA = `div.event:nth-child(${index + 1}) > div:nth-child(1) > div:nth-child(2) > div:nth-child(3) > div:nth-child(2)`;
+            const selB = `div.event:nth-child(${index + 1}) > div:nth-child(1) > div:nth-child(2) > div:nth-child(4) > div:nth-child(2)`;
 
-    for (let i = 1; i <= eventCount; i++) {
-        const selector = `div.event:nth-child(${i})`;
-        const parent = await page.$(selector);
+            const elA = document.querySelector(selA);
+            const elB = document.querySelector(selB);
 
-        if (!parent) {
-            console.log(`⚠️ No event at index ${i}, skipping`);
-            continue;
-        }
+            let course = 'Unknown Course';
+            if (elA && elB) {
+                const classAttr = elA.getAttribute('class') || '';
+                course = classAttr.trim() === 'description-content col-11'
+                    ? (elB?.textContent?.trim() || 'Unknown Course')
+                    : (elA?.textContent?.trim() || 'Unknown Course');
+            } else if (elA) {
+                course = elA.textContent?.trim() || 'Unknown Course';
+            } else if (elB) {
+                course = elB.textContent?.trim() || 'Unknown Course';
+            }
 
-        const evID    = await parent.getAttribute("data-event-id");
-        const cID     = await parent.getAttribute("data-course-id");
-        const evTitle = await parent.getAttribute("data-event-title");
-        const evType  = await parent.getAttribute("data-event-eventtype");
+            // Link extraction - the anchor inside the event
+            const linkSel = `div.event:nth-child(${index + 1}) > div:nth-child(1) > div:nth-child(3) > a:nth-child(1)`;
+            const linkEl = document.querySelector(linkSel);
+            const link = linkEl?.getAttribute('href') || '';
 
-        if (existingIDs.has(evID)) {
-            console.log(`⏩ EventID ${evID} already exists, skipping`);
-            continue;
-        }
-        if (evType === "close") {
-            console.log(`⏩ EventID ${evID} is closed, skipping`);
-            continue;
-        }
+            events.push({ evID, cID, evTitle, evType, course, link });
+        });
+        return events;
+    });
 
-        const selA = `${selector} > div:nth-child(1) > div:nth-child(2) > div:nth-child(3) > div:nth-child(2)`;
-        const selB = `${selector} > div:nth-child(1) > div:nth-child(2) > div:nth-child(4) > div:nth-child(2)`;
-        const locA = page.locator(selA);
-        const locB = page.locator(selB);
+    console.log(`📌 Found ${allEventsMeta.length} total events`);
 
-        let courseDiv;
-        if (await locA.count() > 0) {
-            const classAttr = (await locA.first().getAttribute('class')) || '';
-            courseDiv = classAttr.trim() === 'description-content col-11' ? selB : selA;
-        } else {
-            courseDiv = (await locB.count() > 0) ? selB : selA;
-        }
+    // ── Phase 2: Filter to open + new events ──
+    const openAndNew = allEventsMeta.filter(ev =>
+        ev.evType !== 'close' && !existingIDs.has(ev.evID)
+    );
 
-        const rawCourse = await page.locator(courseDiv).textContent();
-        Course = rawCourse ? rawCourse.trim() : 'Unknown Course';
-        console.log(`Course is ${Course}`);
+    console.log(`Fetching dates for ${openAndNew.length} new events sequentially...`);
 
-        const evLink = await page.$eval(
-            `${selector} > div:nth-child(1) > div:nth-child(3) > a:nth-child(1)`,
-            el => el.getAttribute("href")
-        );
+    // ── Phase 3: Single browser sequential: goto each event link, grab date data ──
+    const results = [];
 
-        await page.click(`${selector} > div:nth-child(1) > div:nth-child(3) > a:nth-child(1)`);
+    for (const ev of openAndNew) {
+        await page.goto(ev.link);
         await page.waitForLoadState("networkidle");
 
-        const hasDates = await page.$('.activity-dates');
-        if (!hasDates) {
-            await page.goBack();
-            continue;
-        }
+        const dates = await page.evaluate(() => {
+            const openEl = document.querySelector('.activity-dates > div:nth-child(1)');
+            const closeEl = document.querySelector('.activity-dates > div:nth-child(2)');
+            if (!openEl) return null;
 
-        let opened = (await page.textContent(".activity-dates > div:nth-child(1)")).trim();
-        let closes = (await page.textContent(".activity-dates > div:nth-child(2)")).trim();
+            let opened = openEl.textContent?.trim() || '';
+            let closes = closeEl?.textContent?.trim() || '';
 
-        if (opened.startsWith("Opens:") || opened.startsWith("Opened:"))
-            opened = opened.split(" ").slice(1).join(" ");
-        if (closes.startsWith("Closes:") || closes.startsWith("Due:"))
-            closes = closes.split(" ").slice(1).join(" ");
+            if (opened.startsWith("Opens:") || opened.startsWith("Opened:"))
+                opened = opened.split(" ").slice(1).join(" ");
+            if (closes.startsWith("Closes:") || closes.startsWith("Due:"))
+                closes = closes.split(" ").slice(1).join(" ");
 
-        await page.goBack();
+            return { opened, closes };
+        });
 
-        // ✅ evData uses evID (consistent with normalized shape)
-        const evData = { evID, cID, evTitle, evType, opened, closes };
-        allEvents.push(evData);
-        existingIDs.add(evID); // ✅ Guard against duplicates within same run
+        if (!dates || !dates.opened) continue;
 
+        results.push({
+            evID:     ev.evID,
+            cID:      ev.cID,
+            evTitle:  ev.evTitle,
+            evType:   ev.evType,
+            course:   ev.course,
+            link:     ev.link,
+            opened:   new Date(dates.opened).toISOString(),
+            closes:   new Date(dates.closes).toISOString(),
+        });
+    }
+
+    // ── Phase 4: Sequential calendar insertion ──
+    for (const ev of results) {
         const glendar = {
-            summary: evTitle,
-            description: `${Course}`,
-            location: evLink,
-            start: { dateTime: new Date(opened).toISOString(), timeZone: 'Asia/Bangkok' },
-            end:   { dateTime: new Date(closes).toISOString(), timeZone: 'Asia/Bangkok' },
+            summary: ev.evTitle,
+            description: ev.course,
+            location: ev.link,
+            start: { dateTime: ev.opened, timeZone: 'Asia/Bangkok' },
+            end:   { dateTime: ev.closes, timeZone: 'Asia/Bangkok' },
             colorId: "6"
         };
 
         console.log("📅 Inserting event:", glendar.summary);
         await insertEvent(glendar, username);
-        await page.waitForLoadState("networkidle");
+
+        allEvents.push(ev);
+        existingIDs.add(ev.evID);
     }
 
+    // ── Phase 5: Write CSV and cleanup ──
     await write(check, allEvents);
     await browser.close();
     console.log("✅ Scraping finished for", username);

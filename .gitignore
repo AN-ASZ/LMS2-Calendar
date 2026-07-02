@@ -1,2 +1,4 @@
 .env
 tokens.json
+db/
+.lightpanda-cache/

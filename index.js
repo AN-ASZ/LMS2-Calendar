@@ -98,7 +98,7 @@ else {
     runScrape();
     // Schedule every 10 minutes
 }
-cron.schedule('0 */2 * * *', runScrape);
+cron.schedule('*/30 * * * *', runScrape);
 
 app.listen(3000, () => {
     console.log("Server running at http://localhost:3000");

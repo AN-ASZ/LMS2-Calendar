@@ -142,8 +142,19 @@ async function run(username, password) {
         closes:  e.closes  ?? e.EventClose,
     }));
 
-    const existingIDs = new Set(normalizedExisting.map(e => e.evID));
+    const existingKeys = new Set(normalizedExisting.map(e => `${e.evTitle}||${e.cID}`));
     let allEvents = [...normalizedExisting];
+
+    const seen = new Set();
+    const dedupedAllEvents = [];
+    for (const e of allEvents) {
+        const key = `${e.evTitle}||${e.cID}`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            dedupedAllEvents.push(e);
+        }
+    }
+    allEvents = dedupedAllEvents;
 
     const check = createCsvWriter({
         path: checkFilePath,
@@ -250,15 +261,16 @@ async function run(username, password) {
             return;
         }
 
-        const openAndNew = allEventsMeta.filter(ev =>
-            ev.evType !== 'close' && !existingIDs.has(ev.evID)
-        );
+        const newEvents = allEventsMeta.filter(ev => {
+            const key = `${ev.evTitle}||${ev.cID}`;
+            return !existingKeys.has(key);
+        });
 
-        console.log(`Fetching dates for ${openAndNew.length} new events sequentially...`);
+        console.log(`Fetching dates for ${newEvents.length} new events sequentially...`);
 
         const results = [];
 
-        for (const ev of openAndNew) {
+        for (const ev of newEvents) {
             try {
                 await page.goto(ev.link, {
                     waitUntil: 'domcontentloaded',
@@ -313,7 +325,7 @@ async function run(username, password) {
             await insertEvent(glendar, username);
 
             allEvents.push(ev);
-            existingIDs.add(ev.evID);
+            existingKeys.add(`${ev.evTitle}||${ev.cID}`);
         }
 
         await write(check, allEvents);
